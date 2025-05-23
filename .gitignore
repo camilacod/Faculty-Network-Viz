@@ -1,0 +1,5 @@
+*.ipynb
+notebook.ipynb
+scrapper_get_images.py
+scrapper.py
+*.pdf

@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>UTEC Faculty Network Visualization</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://d3js.org/d3.v7.min.js"></script>
+</head>
+<body>
+    <header>
+        <h1>UTEC Faculty Network</h1>
+        <div class="controls">
+            <div class="legend">
+                <div class="legend-item">
+                    <div class="legend-color person"></div>
+                    <span>Professors</span>
+                </div>
+                <div class="legend-item">
+                    <div class="legend-color organization"></div>
+                    <span>Departments/Research Groups</span>
+                </div>
+            </div>
+            <div class="filter-controls">
+                <label for="highlight-bridges">
+                    <input type="checkbox" id="highlight-bridges"> Highlight bridge professors
+                </label>
+                <select id="department-filter">
+                    <option value="all">All Departments</option>
+                </select>
+                <button id="reset-view">Reset View</button>
+            </div>
+        </div>
+    </header>
+    
+    <main>
+        <div class="visualization-container">
+            <div id="network-viz"></div>
+            <div id="tooltip" class="tooltip"></div>
+        </div>
+        
+        <div class="insights-panel">
+            <h2>Network Insights</h2>
+            <div class="insight-card">
+                <h3>Bridge Professors</h3>
+                <p>Professors connected to multiple departments/research groups.</p>
+                <div id="bridge-list"></div>
+            </div>
+            <div class="insight-card">
+                <h3>Department Connectivity</h3>
+                <p>How interconnected departments are through shared faculty.</p>
+                <div id="department-connectivity"></div>
+            </div>
+            <div class="insight-card">
+                <h3>Key Statistics</h3>
+                <ul id="network-stats"></ul>
+            </div>
+        </div>
+    </main>
+    
+    <footer>
+        <p>Data Visualization of UTEC Faculty Network</p>
+    </footer>
+
+    <script>
+        // Global variables
+        let nodes = [];
+        let links = [];
+        let simulation;
+        let svg;
+        let nodeElements;
+        let linkElements;
+        let width, height;
+        
+        // Colors for different node types
+        const colors = {
+            person: '#3498db',
+            organization: '#e74c3c'
+        };
+        
+        // Load data and initialize visualization
+        async function loadData() {
+            const response = await fetch('/data');
+            const data = await response.json();
+            
+            nodes = data.nodes;
+            links = data.edges.map(edge => ({
+                source: edge.source,
+                target: edge.target,
+                relationship: edge.relationship
+            }));
+            
+            initVisualization();
+            populateDepartmentFilter();
+            calculateNetworkStats();
+        }
+        
+        function initVisualization() {
+            // Get container dimensions
+            const container = document.getElementById('network-viz');
+            width = container.clientWidth;
+            height = container.clientHeight || 600;
+            
+            // Create SVG
+            svg = d3.select('#network-viz')
+                .append('svg')
+                .attr('width', width)
+                .attr('height', height);
+            
+            // Add zoom behavior
+            const zoom = d3.zoom()
+                .scaleExtent([0.1, 4])
+                .on('zoom', (event) => {
+                    g.attr('transform', event.transform);
+                });
+            
+            svg.call(zoom);
+            
+            // Create container for nodes and links
+            const g = svg.append('g');
+            
+            // Create force simulation
+            simulation = d3.forceSimulation(nodes)
+                .force('link', d3.forceLink(links).id(d => d.id).distance(100))
+                .force('charge', d3.forceManyBody().strength(-300))
+                .force('center', d3.forceCenter(width / 2, height / 2))
+                .force('collision', d3.forceCollide().radius(d => getNodeSize(d) + 5));
+            
+            // Create links
+            linkElements = g.append('g')
+                .selectAll('line')
+                .data(links)
+                .enter()
+                .append('line')
+                .attr('stroke', '#999')
+                .attr('stroke-opacity', 0.6)
+                .attr('stroke-width', 1);
+            
+            // Create nodes
+            const nodeGroup = g.append('g')
+                .selectAll('g')
+                .data(nodes)
+                .enter()
+                .append('g')
+                .attr('class', 'node-group')
+                .call(d3.drag()
+                    .on('start', dragStarted)
+                    .on('drag', dragged)
+                    .on('end', dragEnded))
+                .on('mouseover', showTooltip)
+                .on('mouseout', hideTooltip)
+                .on('click', highlightConnections);
+            
+            // Add circles for nodes
+            nodeGroup.append('circle')
+                .attr('r', getNodeSize)
+                .attr('fill', d => colors[d.type])
+                .attr('stroke', '#fff')
+                .attr('stroke-width', 1.5);
+            
+            // Add labels for organization nodes
+            nodeGroup.filter(d => d.type === 'organization')
+                .append('text')
+                .attr('dy', 4)
+                .attr('text-anchor', 'middle')
+                .text(d => getShortName(d.name))
+                .attr('font-size', '8px')
+                .attr('fill', '#fff');
+            
+            nodeElements = nodeGroup;
+            
+            // Update simulation on tick
+            simulation.on('tick', () => {
+                linkElements
+                    .attr('x1', d => d.source.x)
+                    .attr('y1', d => d.source.y)
+                    .attr('x2', d => d.target.x)
+                    .attr('y2', d => d.target.y);
+                
+                nodeGroup.attr('transform', d => `translate(${d.x},${d.y})`);
+            });
+            
+            // Find and highlight bridge professors
+            findBridgeProfessors();
+        }
+        
+        function getNodeSize(d) {
+            if (d.type === 'person') {
+                return 8;
+            } else {
+                // Organization size based on connections
+                const connCount = links.filter(link => 
+                    link.source.id === d.id || link.target.id === d.id
+                ).length;
+                return Math.max(12, Math.min(25, 12 + connCount / 2));
+            }
+        }
+        
+        function getShortName(name) {
+            if (name.startsWith('Centro de ')) {
+                return name.substring(10).trim();
+            }
+            if (name.startsWith('Departamento de ')) {
+                return name.substring(16).trim();
+            }
+            if (name.startsWith('Grupo de ')) {
+                return name.substring(9).trim();
+            }
+            
+            const words = name.split(' ');
+            if (words.length <= 2) return name;
+            
+        
+            if (name.includes('Departamento')) {
+                return name.split(' ')
+                    .filter(w => w.length > 0 && w[0].toUpperCase() === w[0])
+                    .map(w => w[0])
+                    .join('');
+            }
+            
+            
+            return words.slice(0, 2).join(' ');
+        }
+        
+        function dragStarted(event, d) {
+            if (!event.active) simulation.alphaTarget(0.3).restart();
+            d.fx = d.x;
+            d.fy = d.y;
+        }
+        
+        function dragged(event, d) {
+            d.fx = event.x;
+            d.fy = event.y;
+        }
+        
+        function dragEnded(event, d) {
+            if (!event.active) simulation.alphaTarget(0);
+            d.fx = null;
+            d.fy = null;
+        }
+        
+        // Tooltip functions
+        function showTooltip(event, d) {
+            const tooltip = d3.select('#tooltip');
+            
+            let content = '';
+            if (d.type === 'person') {
+                content = `
+                    <strong>${d.name}</strong><br>
+                    ${d.email ? `Email: ${d.email}<br>` : ''}
+                    <small>Click to see connections</small>
+                `;
+            } else {
+                // Count members
+                const memberCount = links.filter(link => 
+                    (link.target.id === d.id && link.source.type === 'person')
+                ).length;
+                
+                content = `
+                    <strong>${d.name}</strong><br>
+                    Members: ${memberCount}<br>
+                    <small>Click to highlight</small>
+                `;
+            }
+            
+            tooltip.html(content)
+                .style('left', (event.pageX + 10) + 'px')
+                .style('top', (event.pageY - 10) + 'px')
+                .style('opacity', 1);
+        }
+        
+        function hideTooltip() {
+            d3.select('#tooltip').style('opacity', 0);
+        }
+        
+
+        function highlightConnections(event, d) {
+            
+            linkElements.attr('stroke', '#999').attr('stroke-width', 1).attr('stroke-opacity', 0.6);
+            nodeElements.select('circle').attr('stroke', '#fff').attr('stroke-width', 1.5);
+            
+            // Get connected nodes
+            const connectedNodeIds = links
+                .filter(link => link.source.id === d.id || link.target.id === d.id)
+                .flatMap(link => [link.source.id, link.target.id]);
+            
+            // Highlight connected links
+            linkElements
+                .filter(link => link.source.id === d.id || link.target.id === d.id)
+                .attr('stroke', '#ff9800')
+                .attr('stroke-width', 2)
+                .attr('stroke-opacity', 1);
+            
+            // Highlight connected nodes
+            nodeElements
+                .filter(node => connectedNodeIds.includes(node.id))
+                .select('circle')
+                .attr('stroke', '#ff9800')
+                .attr('stroke-width', 2);
+        }
+        
+        // Find professors that act as bridges between departments
+        function findBridgeProfessors() {
+            const professorConnections = {};
+            
+            // Count connections for each professor
+            nodes.filter(node => node.type === 'person').forEach(person => {
+                // Get connected organizations
+                const connectedOrgs = links
+                    .filter(link => link.source.id === person.id && link.target.type === 'organization')
+                    .map(link => link.target.id);
+                
+                const uniqueOrgs = [...new Set(connectedOrgs)];
+                professorConnections[person.id] = uniqueOrgs;
+            });
+            
+            // Find professors connected to multiple organizations
+            const bridgeProfessors = Object.entries(professorConnections)
+                .filter(([_, orgs]) => orgs.length > 1)
+                .map(([profId, orgs]) => ({
+                    professor: nodes.find(n => n.id === parseInt(profId)),
+                    connectionCount: orgs.length,
+                    orgIds: orgs
+                }))
+                .sort((a, b) => b.connectionCount - a.connectionCount);
+            
+            // Populate the bridge list
+            const bridgeList = document.getElementById('bridge-list');
+            bridgeList.innerHTML = bridgeProfessors.length > 0 
+                ? bridgeProfessors.slice(0, 5).map(item => {
+                    const orgNames = item.orgIds.map(orgId => 
+                        nodes.find(n => n.id === orgId).name
+                    ).join(', ');
+                    
+                    return `<div class="bridge-item">
+                        <strong>${item.professor.name}</strong>: 
+                        ${item.connectionCount} connections
+                    </div>`;
+                }).join('')
+                : '<p>No bridge professors found</p>';
+            
+            // Add event handler for highlight bridges checkbox
+            document.getElementById('highlight-bridges').addEventListener('change', function() {
+                if (this.checked) {
+                    // Highlight bridge professors
+                    nodeElements
+                        .filter(d => d.type === 'person' && professorConnections[d.id]?.length > 1)
+                        .select('circle')
+                        .attr('stroke', '#ff9800')
+                        .attr('stroke-width', 2);
+                } else {
+                    // Reset highlights
+                    nodeElements.select('circle')
+                        .attr('stroke', '#fff')
+                        .attr('stroke-width', 1.5);
+                }
+            });
+        }
+        
+        // Populate department filter dropdown
+        function populateDepartmentFilter() {
+            const departmentNodes = nodes.filter(node => node.type === 'organization');
+            const select = document.getElementById('department-filter');
+            
+            departmentNodes.forEach(dept => {
+                const option = document.createElement('option');
+                option.value = dept.id;
+                option.textContent = getShortName(dept.name);
+                select.appendChild(option);
+            });
+            
+            // Add event listener
+            select.addEventListener('change', function() {
+                const deptId = this.value;
+                
+                if (deptId === 'all') {
+                    // Show all nodes and links
+                    nodeElements.style('opacity', 1);
+                    linkElements.style('opacity', 0.6);
+                } else {
+                    // Get connected nodes
+                    const connectedNodeIds = links
+                        .filter(link => link.source.id === parseInt(deptId) || link.target.id === parseInt(deptId))
+                        .flatMap(link => [link.source.id, link.target.id]);
+                    
+                    // Highlight connected nodes and links
+                    nodeElements.style('opacity', node => 
+                        connectedNodeIds.includes(node.id) ? 1 : 0.2
+                    );
+                    
+                    linkElements.style('opacity', link => 
+                        link.source.id === parseInt(deptId) || link.target.id === parseInt(deptId) ? 0.8 : 0.1
+                    );
+                }
+            });
+        }
+        
+    
+        function calculateNetworkStats() {
+            const stats = document.getElementById('network-stats');
+            
+            // Count node types
+            const personCount = nodes.filter(n => n.type === 'person').length;
+            const orgCount = nodes.filter(n => n.type === 'organization').length;
+            
+            // Calculate other metrics
+            const avgConnections = (links.length / personCount).toFixed(2);
+            
+            // Get department with most connections
+            const departmentConnections = {};
+            nodes.filter(n => n.type === 'organization').forEach(dept => {
+                departmentConnections[dept.id] = links.filter(
+                    link => link.source.id === dept.id || link.target.id === dept.id
+                ).length;
+            });
+            
+            const topDeptId = Object.entries(departmentConnections)
+                .sort((a, b) => b[1] - a[1])[0][0];
+            const topDept = nodes.find(n => n.id === parseInt(topDeptId));
+            
+            // Display stats
+            stats.innerHTML = `
+                <li>Professors: ${personCount}</li>
+                <li>Departments/Groups: ${orgCount}</li>
+                <li>Average connections per professor: ${avgConnections}</li>
+                <li>Most connected group: ${topDept ? topDept.name : 'Unknown'}</li>
+            `;
+            
+            // Calculate and display department connectivity
+            calculateDepartmentConnectivity();
+        }
+        
+        // Calculate how departments are connected through shared faculty
+        function calculateDepartmentConnectivity() {
+            const departmentConnectivity = document.getElementById('department-connectivity');
+            
+            // Get departments
+            const departments = nodes.filter(n => n.type === 'organization');
+            
+            // For each department, find professors
+            const departmentMembers = {};
+            departments.forEach(dept => {
+                departmentMembers[dept.id] = links
+                    .filter(link => 
+                        link.target.id === dept.id && 
+                        link.source.type === 'person'
+                    )
+                    .map(link => link.source.id);
+            });
+            
+            // Find pairs of departments with shared members
+            const connections = [];
+            for (let i = 0; i < departments.length; i++) {
+                for (let j = i + 1; j < departments.length; j++) {
+                    const dept1 = departments[i];
+                    const dept2 = departments[j];
+                    
+                    const members1 = departmentMembers[dept1.id] || [];
+                    const members2 = departmentMembers[dept2.id] || [];
+                    
+                    // Find shared members
+                    const sharedMembers = members1.filter(m => members2.includes(m));
+                    
+                    if (sharedMembers.length > 0) {
+                        connections.push({
+                            dept1: dept1.name,
+                            dept2: dept2.name,
+                            sharedCount: sharedMembers.length
+                        });
+                    }
+                }
+            }
+            
+            // Sort by number of shared members
+            connections.sort((a, b) => b.sharedCount - a.sharedCount);
+            
+            // Display top connections
+            departmentConnectivity.innerHTML = connections.length > 0
+                ? connections.slice(0, 5).map(conn => {
+                    // Apply getShortName to both department names
+                    const dept1Display = getShortName(conn.dept1);
+                    const dept2Display = getShortName(conn.dept2);
+                    return `<div class="connectivity-item">
+                        <div>${dept1Display} ↔ ${dept2Display}</div>
+                        <div>${conn.sharedCount} shared faculty</div>
+                    </div>`;
+                }).join('')
+                : '<p>No department connections found</p>';
+        }
+        
+        // Reset view
+        document.getElementById('reset-view').addEventListener('click', () => {
+            // Reset filters
+            document.getElementById('highlight-bridges').checked = false;
+            document.getElementById('department-filter').value = 'all';
+            
+            // Reset visualization
+            nodeElements.style('opacity', 1);
+            linkElements.attr('stroke', '#999').attr('stroke-width', 1).attr('stroke-opacity', 0.6);
+            nodeElements.select('circle').attr('stroke', '#fff').attr('stroke-width', 1.5);
+            
+            // Reset simulation
+            simulation.alpha(1).restart();
+        });
+        
+        // Initialize on page load
+        document.addEventListener('DOMContentLoaded', loadData);
+    </script>
+</body>
+</html>
